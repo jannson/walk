@@ -24,7 +24,7 @@ func runDispatchHook(msg *win.MSG) bool {
 	dispatchHook.m.RLock()
 	hooks = append(hooks, dispatchHook.hooks...)
 	dispatchHook.m.RUnlock()
-	for h := range hooks {
+	for _, h := range hooks {
 		next := h(msg)
 		if !next {
 			return false
