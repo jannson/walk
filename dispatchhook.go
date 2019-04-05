@@ -14,16 +14,16 @@ var dispatchHook struct {
 }
 
 func AddDispatchHook(hook func(msg *win.MSG) bool) {
-	defer m.Unlock()
-	m.Lock()
+	defer dispatchHook.m.Unlock()
+	dispatchHook.m.Lock()
 	dispatchHook.hooks = append(dispatchHook.hooks, hook)
 }
 
 func runDispatchHook(msg *win.MSG) bool {
 	var hooks []func(msg *win.MSG) bool
-	m.RLock()
+	dispatchHook.m.RLock()
 	hooks = append(hooks, dispatchHook.hooks...)
-	m.RUnlock()
+	dispatchHook.m.RUnlock()
 	for h := range hooks {
 		next := h(msg)
 		if !next {
