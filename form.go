@@ -413,7 +413,9 @@ func (fb *FormBase) Run() int {
 
 		if !win.IsDialogMessage(fb.hWnd, &msg) {
 			win.TranslateMessage(&msg)
-			win.DispatchMessage(&msg)
+			if runDispatchHook(&msg) {
+				win.DispatchMessage(&msg)
+			}
 		}
 
 		runSynchronized()
