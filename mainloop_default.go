@@ -44,3 +44,17 @@ func (fb *FormBase) mainLoop() int {
 
 	return 0
 }
+
+func runDispatchHook(msg *win.MSG) bool {
+	var hooks []func(msg *win.MSG) bool
+	dispatchHook.m.RLock()
+	hooks = append(hooks, dispatchHook.hooks...)
+	dispatchHook.m.RUnlock()
+	for _, h := range hooks {
+		next := h(msg)
+		if !next {
+			return false
+		}
+	}
+	return true
+}

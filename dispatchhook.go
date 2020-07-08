@@ -18,17 +18,3 @@ func AddDispatchHook(hook func(msg *win.MSG) bool) {
 	dispatchHook.m.Lock()
 	dispatchHook.hooks = append(dispatchHook.hooks, hook)
 }
-
-func runDispatchHook(msg *win.MSG) bool {
-	var hooks []func(msg *win.MSG) bool
-	dispatchHook.m.RLock()
-	hooks = append(hooks, dispatchHook.hooks...)
-	dispatchHook.m.RUnlock()
-	for _, h := range hooks {
-		next := h(msg)
-		if !next {
-			return false
-		}
-	}
-	return true
-}

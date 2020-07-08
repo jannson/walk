@@ -16,6 +16,7 @@ import (
 //
 // extern void shimRunSynchronized(uintptr_t fb);
 // extern unsigned char shimHandleKeyDown(uintptr_t fb, uintptr_t m);
+// extern unsigned char runDispatchHook(uintptr_t m);
 //
 // static int mainloop(uintptr_t handle_ptr, uintptr_t fb_ptr)
 // {
@@ -33,6 +34,9 @@ import (
 //             continue;
 //         if (!IsDialogMessage(*hwnd, &m)) {
 //             TranslateMessage(&m);
+//             if (runDispatchHook((uintptr_t)&m)) {
+//                TranslateMessage(&m);
+//             }
 //             DispatchMessage(&m);
 //         }
 //         shimRunSynchronized(fb_ptr);
@@ -49,6 +53,23 @@ func shimHandleKeyDown(fb uintptr, msg uintptr) bool {
 //export shimRunSynchronized
 func shimRunSynchronized(fb uintptr) {
 	(*FormBase)(unsafe.Pointer(fb)).group.RunSynchronized()
+}
+
+//export runDispatchHook
+func runDispatchHook(pmsg uintptr) bool {
+	var msg *win.MSG
+	msg = (*win.MSG)(unsafe.Pointer(pmsg))
+	var hooks []func(msg *win.MSG) bool
+	dispatchHook.m.RLock()
+	hooks = append(hooks, dispatchHook.hooks...)
+	dispatchHook.m.RUnlock()
+	for _, h := range hooks {
+		next := h(msg)
+		if !next {
+			return false
+		}
+	}
+	return true
 }
 
 func (fb *FormBase) mainLoop() int {
