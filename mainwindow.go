@@ -17,7 +17,9 @@ import (
 const mainWindowWindowClass = `\o/ Walk_MainWindow_Class \o/`
 
 func init() {
-	MustRegisterWindowClass(mainWindowWindowClass)
+	AppendToWalkInit(func() {
+		MustRegisterWindowClass(mainWindowWindowClass)
+	})
 }
 
 type MainWindow struct {
@@ -57,7 +59,7 @@ func NewMainWindowWithName(name string) (*MainWindow, error) {
 
 	var err error
 
-	if mw.menu, err = newMenuBar(mw.hWnd); err != nil {
+	if mw.menu, err = newMenuBar(mw); err != nil {
 		return nil, err
 	}
 	if !win.SetMenu(mw.hWnd, mw.menu.hMenu) {
@@ -78,7 +80,7 @@ func NewMainWindowWithName(name string) (*MainWindow, error) {
 	mw.statusBar.parent = mw
 	win.SetParent(mw.statusBar.hWnd, mw.hWnd)
 	mw.statusBar.visibleChangedPublisher.event.Attach(func() {
-		mw.SetBounds(mw.Bounds())
+		mw.SetBoundsPixels(mw.BoundsPixels())
 	})
 
 	succeeded = true
@@ -114,18 +116,18 @@ func (mw *MainWindow) StatusBar() *StatusBar {
 	return mw.statusBar
 }
 
-func (mw *MainWindow) ClientBounds() Rectangle {
-	bounds := mw.FormBase.ClientBounds()
+func (mw *MainWindow) ClientBoundsPixels() Rectangle {
+	bounds := mw.FormBase.ClientBoundsPixels()
 
 	if mw.toolBar != nil && mw.toolBar.Actions().Len() > 0 {
-		tlbBounds := mw.toolBar.Bounds()
+		tlbBounds := mw.toolBar.BoundsPixels()
 
 		bounds.Y += tlbBounds.Height
 		bounds.Height -= tlbBounds.Height
 	}
 
 	if mw.statusBar.Visible() {
-		bounds.Height -= mw.statusBar.Height()
+		bounds.Height -= mw.statusBar.HeightPixels()
 	}
 
 	return bounds
@@ -135,9 +137,7 @@ func (mw *MainWindow) SetVisible(visible bool) {
 	if visible {
 		win.DrawMenuBar(mw.hWnd)
 
-		if mw.clientComposite.layout != nil {
-			mw.clientComposite.layout.Update(false)
-		}
+		mw.clientComposite.RequestLayout()
 	}
 
 	mw.FormBase.SetVisible(visible)
@@ -213,14 +213,23 @@ func (mw *MainWindow) SetFullscreen(fullscreen bool) error {
 
 func (mw *MainWindow) WndProc(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintptr {
 	switch msg {
-	case win.WM_SIZE, win.WM_SIZING:
-		cb := mw.ClientBounds()
+	case win.WM_WINDOWPOSCHANGED:
+		wp := (*win.WINDOWPOS)(unsafe.Pointer(lParam))
 
-		if mw.toolBar != nil {
-			mw.toolBar.SetBounds(Rectangle{0, 0, cb.Width, mw.toolBar.Height()})
+		if wp.Flags&win.SWP_NOSIZE != 0 {
+			break
 		}
 
-		mw.statusBar.SetBounds(Rectangle{0, cb.Y + cb.Height, cb.Width, mw.statusBar.Height()})
+		cb := mw.ClientBoundsPixels()
+
+		if mw.toolBar != nil {
+			mw.toolBar.SetBoundsPixels(Rectangle{0, 0, cb.Width, mw.toolBar.HeightPixels()})
+		}
+
+		mw.statusBar.SetBoundsPixels(Rectangle{0, cb.Y + cb.Height, cb.Width, mw.statusBar.HeightPixels()})
+
+	case win.WM_INITMENUPOPUP:
+		mw.menu.updateItemsWithImageForWindow(mw)
 	}
 
 	return mw.FormBase.WndProc(hwnd, msg, wParam, lParam)

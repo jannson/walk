@@ -6,7 +6,11 @@
 
 package walk
 
-import "github.com/lxn/win"
+import (
+	"syscall"
+
+	"github.com/lxn/win"
+)
 
 // BindingValueProvider is the interface that a model must implement to support
 // data binding with widgets like ComboBox.
@@ -138,6 +142,10 @@ type TableModel interface {
 	// changed.
 	RowChanged() *IntEvent
 
+	// RowsChanged returns the event that the model should publish when a
+	// contiguous range of items was changed.
+	RowsChanged() *IntRangeEvent
+
 	// RowsInserted returns the event that the model should publish when a
 	// contiguous range of items was inserted. If the model supports sorting, it
 	// is assumed to be sorted before the model publishes the event.
@@ -153,6 +161,7 @@ type TableModel interface {
 type TableModelBase struct {
 	rowsResetPublisher    EventPublisher
 	rowChangedPublisher   IntEventPublisher
+	rowsChangedPublisher  IntRangeEventPublisher
 	rowsInsertedPublisher IntRangeEventPublisher
 	rowsRemovedPublisher  IntRangeEventPublisher
 }
@@ -163,6 +172,10 @@ func (tmb *TableModelBase) RowsReset() *Event {
 
 func (tmb *TableModelBase) RowChanged() *IntEvent {
 	return tmb.rowChangedPublisher.Event()
+}
+
+func (tmb *TableModelBase) RowsChanged() *IntRangeEvent {
+	return tmb.rowsChangedPublisher.Event()
 }
 
 func (tmb *TableModelBase) RowsInserted() *IntRangeEvent {
@@ -179,6 +192,10 @@ func (tmb *TableModelBase) PublishRowsReset() {
 
 func (tmb *TableModelBase) PublishRowChanged(row int) {
 	tmb.rowChangedPublisher.Publish(row)
+}
+
+func (tmb *TableModelBase) PublishRowsChanged(from, to int) {
+	tmb.rowsChangedPublisher.Publish(from, to)
 }
 
 func (tmb *TableModelBase) PublishRowsInserted(from, to int) {
@@ -202,6 +219,10 @@ type ReflectTableModel interface {
 	// RowChanged returns the event that the model should publish when an item
 	// was changed.
 	RowChanged() *IntEvent
+
+	// RowsChanged returns the event that the model should publish when a
+	// contiguous range of items was changed.
+	RowsChanged() *IntRangeEvent
 
 	// RowsInserted returns the event that the model should publish when a
 	// contiguous range of items was inserted. If the model supports sorting, it
@@ -297,8 +318,9 @@ type CellStyler interface {
 type CellStyle struct {
 	row             int
 	col             int
-	bounds          Rectangle
+	bounds          Rectangle // in native pixels
 	hdc             win.HDC
+	dpi             int
 	canvas          *Canvas
 	BackgroundColor Color
 	TextColor       Color
@@ -322,15 +344,168 @@ func (cs *CellStyle) Col() int {
 }
 
 func (cs *CellStyle) Bounds() Rectangle {
+	return RectangleTo96DPI(cs.bounds, cs.dpi)
+}
+
+func (cs *CellStyle) BoundsPixels() Rectangle {
 	return cs.bounds
 }
 
 func (cs *CellStyle) Canvas() *Canvas {
-	if cs.canvas == nil && cs.hdc != 0 {
+	if cs.canvas != nil {
+		cs.canvas.dpi = cs.dpi
+		return cs.canvas
+	}
+
+	if cs.hdc != 0 {
 		cs.canvas, _ = newCanvasFromHDC(cs.hdc)
+		cs.canvas.dpi = cs.dpi
 	}
 
 	return cs.canvas
+}
+
+// ListItemStyler is the interface that must be implemented to provide a list
+// widget like ListBox with item display style information.
+type ListItemStyler interface {
+	// ItemHeightDependsOnWidth returns whether item height depends on width.
+	ItemHeightDependsOnWidth() bool
+
+	// DefaultItemHeight returns the initial height in native pixels for any item.
+	DefaultItemHeight() int
+
+	// ItemHeight is called for each item to retrieve the height of the item. width parameter and
+	// return value are specified in native pixels.
+	ItemHeight(index int, width int) int
+
+	// StyleItem is called for each item to pick up item style information.
+	StyleItem(style *ListItemStyle)
+}
+
+// ListItemStyle carries information about the display style of an item in a list widget
+// like ListBox.
+type ListItemStyle struct {
+	BackgroundColor    Color
+	TextColor          Color
+	LineColor          Color
+	Font               *Font
+	index              int
+	hoverIndex         int
+	rc                 win.RECT
+	bounds             Rectangle // in native pixels
+	state              uint32
+	hTheme             win.HTHEME
+	hwnd               win.HWND
+	hdc                win.HDC
+	dpi                int
+	canvas             *Canvas
+	highContrastActive bool
+}
+
+func (lis *ListItemStyle) Index() int {
+	return lis.index
+}
+
+func (lis *ListItemStyle) Bounds() Rectangle {
+	return RectangleTo96DPI(lis.bounds, lis.dpi)
+}
+
+func (lis *ListItemStyle) BoundsPixels() Rectangle {
+	return lis.bounds
+}
+
+func (lis *ListItemStyle) Canvas() *Canvas {
+	if lis.canvas != nil {
+		lis.canvas.dpi = lis.dpi
+		return lis.canvas
+	}
+
+	if lis.hdc != 0 {
+		lis.canvas, _ = newCanvasFromHDC(lis.hdc)
+		lis.canvas.dpi = lis.dpi
+	}
+
+	return lis.canvas
+}
+
+func (lis *ListItemStyle) DrawBackground() error {
+	canvas := lis.Canvas()
+	if canvas == nil {
+		return nil
+	}
+
+	stateID := lis.stateID()
+
+	if lis.hTheme != 0 && stateID != win.LISS_NORMAL {
+		if win.FAILED(win.DrawThemeBackground(lis.hTheme, lis.hdc, win.LVP_LISTITEM, stateID, &lis.rc, nil)) {
+			return newError("DrawThemeBackground failed")
+		}
+	} else {
+		brush, err := NewSolidColorBrush(lis.BackgroundColor)
+		if err != nil {
+			return err
+		}
+		defer brush.Dispose()
+
+		if err := canvas.FillRectanglePixels(brush, lis.bounds); err != nil {
+			return err
+		}
+
+		if lis.highContrastActive && (lis.index == lis.hoverIndex || stateID != win.LISS_NORMAL) {
+			pen, err := NewCosmeticPen(PenSolid, lis.LineColor)
+			if err != nil {
+				return err
+			}
+			defer pen.Dispose()
+
+			if err := canvas.DrawRectanglePixels(pen, lis.bounds); err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
+}
+
+// DrawText draws text inside given bounds specified in native pixels.
+func (lis *ListItemStyle) DrawText(text string, bounds Rectangle, format DrawTextFormat) error {
+	if lis.hTheme != 0 {
+		if lis.Font != nil {
+			hFontOld := win.SelectObject(lis.hdc, win.HGDIOBJ(lis.Font.handleForDPI(lis.dpi)))
+			defer win.SelectObject(lis.hdc, hFontOld)
+		}
+		rc := bounds.toRECT()
+
+		if win.FAILED(win.DrawThemeTextEx(lis.hTheme, lis.hdc, win.LVP_LISTITEM, lis.stateID(), syscall.StringToUTF16Ptr(text), int32(len(([]rune)(text))), uint32(format), &rc, nil)) {
+			return newError("DrawThemeTextEx failed")
+		}
+	} else {
+		if canvas := lis.Canvas(); canvas != nil {
+			if err := canvas.DrawTextPixels(text, lis.Font, lis.TextColor, bounds, format); err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
+}
+
+func (lis *ListItemStyle) stateID() int32 {
+	if lis.state&win.ODS_CHECKED != 0 {
+		if win.GetFocus() == lis.hwnd {
+			if lis.index == lis.hoverIndex {
+				return win.LISS_HOTSELECTED
+			} else {
+				return win.LISS_SELECTED
+			}
+		} else {
+			return win.LISS_SELECTEDNOTFOCUS
+		}
+	} else if lis.index == lis.hoverIndex {
+		return win.LISS_HOT
+	}
+
+	return win.LISS_NORMAL
 }
 
 // ItemChecker is the interface that a model must implement to support check
@@ -439,6 +614,12 @@ type TreeItem interface {
 	ChildAt(index int) TreeItem
 }
 
+// HasChilder enables widgets like TreeView to determine if an item has any
+// child, without enforcing to fully count all children.
+type HasChilder interface {
+	HasChild() bool
+}
+
 // TreeModel provides widgets like TreeView with item data.
 type TreeModel interface {
 	// LazyPopulation returns if the model prefers on-demand population.
@@ -461,6 +642,14 @@ type TreeModel interface {
 	// ItemChanged returns the event that the model should publish when an item
 	// was changed.
 	ItemChanged() *TreeItemEvent
+
+	// ItemInserted returns the event that the model should publish when an item
+	// was inserted into the model.
+	ItemInserted() *TreeItemEvent
+
+	// ItemRemoved returns the event that the model should publish when an item
+	// was removed from the model.
+	ItemRemoved() *TreeItemEvent
 }
 
 // TreeModelBase partially implements the TreeModel interface.
@@ -469,8 +658,10 @@ type TreeModel interface {
 // RootCount and RootAt methods. If your model needs lazy population,
 // you will also have to implement LazyPopulation.
 type TreeModelBase struct {
-	itemsResetPublisher  TreeItemEventPublisher
-	itemChangedPublisher TreeItemEventPublisher
+	itemsResetPublisher   TreeItemEventPublisher
+	itemChangedPublisher  TreeItemEventPublisher
+	itemInsertedPublisher TreeItemEventPublisher
+	itemRemovedPublisher  TreeItemEventPublisher
 }
 
 func (tmb *TreeModelBase) LazyPopulation() bool {
@@ -485,10 +676,26 @@ func (tmb *TreeModelBase) ItemChanged() *TreeItemEvent {
 	return tmb.itemChangedPublisher.Event()
 }
 
+func (tmb *TreeModelBase) ItemInserted() *TreeItemEvent {
+	return tmb.itemInsertedPublisher.Event()
+}
+
+func (tmb *TreeModelBase) ItemRemoved() *TreeItemEvent {
+	return tmb.itemRemovedPublisher.Event()
+}
+
 func (tmb *TreeModelBase) PublishItemsReset(parent TreeItem) {
 	tmb.itemsResetPublisher.Publish(parent)
 }
 
 func (tmb *TreeModelBase) PublishItemChanged(item TreeItem) {
 	tmb.itemChangedPublisher.Publish(item)
+}
+
+func (tmb *TreeModelBase) PublishItemInserted(item TreeItem) {
+	tmb.itemInsertedPublisher.Publish(item)
+}
+
+func (tmb *TreeModelBase) PublishItemRemoved(item TreeItem) {
+	tmb.itemRemovedPublisher.Publish(item)
 }

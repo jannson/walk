@@ -18,8 +18,10 @@ import (
 type ListBox struct {
 	// Window
 
+	Accessibility      Accessibility
 	Background         Brush
 	ContextMenuItems   []MenuItem
+	DoubleBuffering    bool
 	Enabled            Property
 	Font               Font
 	MaxSize            Size
@@ -54,6 +56,7 @@ type ListBox struct {
 	AssignTo                 **walk.ListBox
 	DataMember               string
 	Format                   string
+	ItemStyler               walk.ListItemStyler
 	Model                    interface{}
 	MultiSelection           bool
 	OnCurrentIndexChanged    walk.EventHandler
@@ -69,11 +72,16 @@ func (lb ListBox) Create(builder *Builder) error {
 		return errors.New("ListBox.Create: DataMember must be empty for []string models.")
 	}
 
-	if lb.MultiSelection {
-		w, err = walk.NewListBoxWithStyle(builder.Parent(), win.LBS_EXTENDEDSEL)
-	} else {
-		w, err = walk.NewListBox(builder.Parent())
+	var style uint32
+
+	if lb.ItemStyler != nil {
+		style |= win.LBS_OWNERDRAWVARIABLE
 	}
+	if lb.MultiSelection {
+		style |= win.LBS_EXTENDEDSEL
+	}
+
+	w, err = walk.NewListBoxWithStyle(builder.Parent(), style)
 	if err != nil {
 		return err
 	}
@@ -83,6 +91,9 @@ func (lb ListBox) Create(builder *Builder) error {
 	}
 
 	return builder.InitWidget(lb, w, func() error {
+		if lb.ItemStyler != nil {
+			w.SetItemStyler(lb.ItemStyler)
+		}
 		w.SetFormat(lb.Format)
 		w.SetPrecision(lb.Precision)
 

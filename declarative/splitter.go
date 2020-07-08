@@ -13,8 +13,10 @@ import (
 type HSplitter struct {
 	// Window
 
+	Accessibility      Accessibility
 	Background         Brush
 	ContextMenuItems   []MenuItem
+	DoubleBuffering    bool
 	Enabled            Property
 	Font               Font
 	MaxSize            Size
@@ -85,6 +87,7 @@ func (s HSplitter) Create(builder *Builder) error {
 type VSplitter struct {
 	// Window
 
+	Accessibility      Accessibility
 	Background         Brush
 	ContextMenuItems   []MenuItem
 	Enabled            Property

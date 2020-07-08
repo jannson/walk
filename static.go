@@ -8,16 +8,20 @@ package walk
 
 import (
 	"syscall"
+	"unsafe"
 
 	"github.com/lxn/win"
 )
 
 const staticWindowClass = `\o/ Walk_Static_Class \o/`
 
-var staticWndProcPtr = syscall.NewCallback(staticWndProc)
+var staticWndProcPtr uintptr
 
 func init() {
-	MustRegisterWindowClass(staticWindowClass)
+	AppendToWalkInit(func() {
+		MustRegisterWindowClass(staticWindowClass)
+		staticWndProcPtr = syscall.NewCallback(staticWndProc)
+	})
 }
 
 type static struct {
@@ -42,7 +46,7 @@ func (s *static) init(widget Widget, parent Container) error {
 		0,
 		syscall.StringToUTF16Ptr("static"),
 		nil,
-		win.WS_CHILD|win.WS_CLIPSIBLINGS|win.WS_VISIBLE|win.SS_LEFT,
+		win.WS_CHILD|win.WS_CLIPSIBLINGS|win.WS_VISIBLE|win.SS_LEFT|win.SS_NOTIFY,
 		win.CW_USEDEFAULT,
 		win.CW_USEDEFAULT,
 		win.CW_USEDEFAULT,
@@ -53,6 +57,10 @@ func (s *static) init(widget Widget, parent Container) error {
 		nil,
 	); s.hwndStatic == 0 {
 		return newError("creating static failed")
+	}
+
+	if err := s.group.toolTip.AddTool(s); err != nil {
+		return err
 	}
 
 	s.origStaticWndProcPtr = win.SetWindowLongPtr(s.hwndStatic, win.GWLP_WNDPROC, staticWndProcPtr)
@@ -78,20 +86,8 @@ func (s *static) Dispose() {
 	s.WidgetBase.Dispose()
 }
 
-func (s *static) LayoutFlags() LayoutFlags {
-	if s.textAlignment1D() == AlignNear {
-		return 0
-	}
-
-	return GrowableHorz
-}
-
-func (s *static) MinSizeHint() Size {
-	return s.calculateTextSizeForWidth(0)
-}
-
-func (s *static) SizeHint() Size {
-	return s.MinSizeHint()
+func (s *static) handleForToolTip() win.HWND {
+	return s.hwndStatic
 }
 
 func (s *static) applyEnabled(enabled bool) {
@@ -103,7 +99,7 @@ func (s *static) applyEnabled(enabled bool) {
 func (s *static) applyFont(font *Font) {
 	s.WidgetBase.applyFont(font)
 
-	setWindowFont(s.hwndStatic, font)
+	SetWindowFont(s.hwndStatic, font)
 }
 
 func (s *static) textAlignment1D() Alignment1D {
@@ -178,15 +174,7 @@ func (s *static) setText(text string) (changed bool, err error) {
 		return false, err
 	}
 
-	size := s.Bounds().Size()
-
-	if err := s.updateParentLayout(); err != nil {
-		return false, err
-	}
-
-	if s.Bounds().Size() == size && size != (Size{}) {
-		s.updateStaticBounds()
-	}
+	s.RequestLayout()
 
 	return true, nil
 }
@@ -199,6 +187,14 @@ func (s *static) SetTextColor(c Color) {
 	s.textColor = c
 
 	s.Invalidate()
+}
+
+func (s *static) shrinkable() bool {
+	if em, ok := s.window.(interface{ EllipsisMode() EllipsisMode }); ok {
+		return em.EllipsisMode() != EllipsisNone
+	}
+
+	return false
 }
 
 func (s *static) updateStaticBounds() {
@@ -226,9 +222,9 @@ func (s *static) updateStaticBounds() {
 		format |= TextBottom
 	}
 
-	cb := s.ClientBounds()
+	cb := s.ClientBoundsPixels()
 
-	if format&TextVCenter != 0 || format&TextBottom != 0 {
+	if shrinkable := s.shrinkable(); shrinkable || format&TextVCenter != 0 || format&TextBottom != 0 {
 		var size Size
 		if _, ok := s.window.(HeightForWidther); ok {
 			size = s.calculateTextSizeForWidth(cb.Width)
@@ -236,13 +232,23 @@ func (s *static) updateStaticBounds() {
 			size = s.calculateTextSize()
 		}
 
-		if format&TextVCenter != 0 {
-			cb.Y += (cb.Height - size.Height) / 2
-		} else {
-			cb.Y += cb.Height - size.Height
+		if shrinkable {
+			var text string
+			if size.Width > cb.Width {
+				text = s.text()
+			}
+			s.SetToolTipText(text)
 		}
 
-		cb.Height = size.Height
+		if format&TextVCenter != 0 || format&TextBottom != 0 {
+			if format&TextVCenter != 0 {
+				cb.Y += (cb.Height - size.Height) / 2
+			} else {
+				cb.Y += cb.Height - size.Height
+			}
+
+			cb.Height = size.Height
+		}
 	}
 
 	win.MoveWindow(s.hwndStatic, int32(cb.X), int32(cb.Y), int32(cb.Width), int32(cb.Height), true)
@@ -257,7 +263,13 @@ func (s *static) WndProc(hwnd win.HWND, msg uint32, wp, lp uintptr) uintptr {
 			return hBrush
 		}
 
-	case win.WM_SIZE:
+	case win.WM_WINDOWPOSCHANGED:
+		wp := (*win.WINDOWPOS)(unsafe.Pointer(lp))
+
+		if wp.Flags&win.SWP_NOSIZE != 0 {
+			break
+		}
+
 		s.updateStaticBounds()
 	}
 
@@ -275,7 +287,54 @@ func staticWndProc(hwnd win.HWND, msg uint32, wp, lp uintptr) uintptr {
 	switch msg {
 	case win.WM_NCHITTEST:
 		return win.HTCLIENT
+
+	case win.WM_MOUSEMOVE, win.WM_LBUTTONDOWN, win.WM_LBUTTONUP, win.WM_MBUTTONDOWN, win.WM_MBUTTONUP, win.WM_RBUTTONDOWN, win.WM_RBUTTONUP:
+		m := win.MSG{
+			HWnd:    hwnd,
+			Message: msg,
+			WParam:  wp,
+			LParam:  lp,
+			Pt:      win.POINT{int32(win.GET_X_LPARAM(lp)), int32(win.GET_Y_LPARAM(lp))},
+		}
+
+		return s.group.toolTip.SendMessage(win.TTM_RELAYEVENT, 0, uintptr(unsafe.Pointer(&m)))
 	}
 
 	return win.CallWindowProc(s.origStaticWndProcPtr, hwnd, msg, wp, lp)
+}
+
+func (s *static) CreateLayoutItem(ctx *LayoutContext) LayoutItem {
+	var layoutFlags LayoutFlags
+	if s.textAlignment1D() != AlignNear {
+		layoutFlags = GrowableHorz
+	} else if s.shrinkable() {
+		layoutFlags = ShrinkableHorz
+	}
+
+	return &staticLayoutItem{
+		layoutFlags: layoutFlags,
+		idealSize:   s.calculateTextSize(),
+	}
+}
+
+type staticLayoutItem struct {
+	LayoutItemBase
+	layoutFlags LayoutFlags
+	idealSize   Size // in native pixels
+}
+
+func (li *staticLayoutItem) LayoutFlags() LayoutFlags {
+	return li.layoutFlags
+}
+
+func (li *staticLayoutItem) IdealSize() Size {
+	return li.idealSize
+}
+
+func (li *staticLayoutItem) MinSize() Size {
+	if li.layoutFlags&ShrinkableHorz != 0 {
+		return Size{Height: li.idealSize.Height}
+	}
+
+	return li.idealSize
 }

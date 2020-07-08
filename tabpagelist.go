@@ -108,6 +108,8 @@ func (l *TabPageList) Insert(index int, item *TabPage) error {
 		}
 	}
 
+	item.RequestLayout()
+
 	return nil
 }
 

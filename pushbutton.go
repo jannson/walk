@@ -7,10 +7,6 @@
 package walk
 
 import (
-	"unsafe"
-)
-
-import (
 	"github.com/lxn/win"
 )
 
@@ -36,22 +32,6 @@ func NewPushButton(parent Container) (*PushButton, error) {
 	pb.GraphicsEffects().Add(FocusEffect)
 
 	return pb, nil
-}
-
-func (*PushButton) LayoutFlags() LayoutFlags {
-	return GrowableHorz
-}
-
-func (pb *PushButton) MinSizeHint() Size {
-	var s win.SIZE
-
-	pb.SendMessage(win.BCM_GETIDEALSIZE, 0, uintptr(unsafe.Pointer(&s)))
-
-	return maxSize(Size{int(s.CX), int(s.CY)}, pb.dialogBaseUnitsToPixels(Size{50, 14}))
-}
-
-func (pb *PushButton) SizeHint() Size {
-	return pb.MinSizeHint()
 }
 
 func (pb *PushButton) ImageAboveText() bool {
@@ -133,4 +113,20 @@ func (pb *PushButton) WndProc(hwnd win.HWND, msg uint32, wParam, lParam uintptr)
 	}
 
 	return pb.Button.WndProc(hwnd, msg, wParam, lParam)
+}
+
+func (pb *PushButton) CreateLayoutItem(ctx *LayoutContext) LayoutItem {
+	return &pushButtonLayoutItem{
+		buttonLayoutItem: buttonLayoutItem{
+			idealSize: pb.idealSize(),
+		},
+	}
+}
+
+type pushButtonLayoutItem struct {
+	buttonLayoutItem
+}
+
+func (*pushButtonLayoutItem) LayoutFlags() LayoutFlags {
+	return GrowableHorz
 }

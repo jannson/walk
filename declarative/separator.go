@@ -13,8 +13,10 @@ import (
 type HSeparator struct {
 	// Window
 
+	Accessibility      Accessibility
 	Background         Brush
 	ContextMenuItems   []MenuItem
+	DoubleBuffering    bool
 	Enabled            Property
 	Font               Font
 	MaxSize            Size
@@ -67,6 +69,7 @@ func (s HSeparator) Create(builder *Builder) error {
 type VSeparator struct {
 	// Window
 
+	Accessibility      Accessibility
 	ContextMenuItems []MenuItem
 	Enabled          Property
 	Font             Font

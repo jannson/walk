@@ -8,16 +8,17 @@ package walk
 
 import (
 	"syscall"
-)
+	"unsafe"
 
-import (
 	"github.com/lxn/win"
 )
 
 const groupBoxWindowClass = `\o/ Walk_GroupBox_Class \o/`
 
 func init() {
-	MustRegisterWindowClass(groupBoxWindowClass)
+	AppendToWalkInit(func() {
+		MustRegisterWindowClass(groupBoxWindowClass)
+	})
 }
 
 type GroupBox struct {
@@ -25,6 +26,7 @@ type GroupBox struct {
 	hWndGroupBox          win.HWND
 	checkBox              *CheckBox
 	composite             *Composite
+	headerHeight          int // in native pixels
 	titleChangedPublisher EventPublisher
 }
 
@@ -54,8 +56,10 @@ func NewGroupBox(parent Container) (*GroupBox, error) {
 	if gb.hWndGroupBox == 0 {
 		return nil, lastError("CreateWindowEx(BUTTON)")
 	}
+	win.SetWindowLong(gb.hWndGroupBox, win.GWL_ID, 1)
 
-	setWindowFont(gb.hWndGroupBox, gb.Font())
+	gb.applyFont(gb.Font())
+	gb.updateHeaderHeight()
 
 	var err error
 
@@ -63,6 +67,7 @@ func NewGroupBox(parent Container) (*GroupBox, error) {
 	if err != nil {
 		return nil, err
 	}
+	win.SetWindowLong(gb.checkBox.hWnd, win.GWL_ID, 2)
 
 	gb.SetCheckable(false)
 	gb.checkBox.SetChecked(true)
@@ -77,6 +82,7 @@ func NewGroupBox(parent Container) (*GroupBox, error) {
 	if err != nil {
 		return nil, err
 	}
+	win.SetWindowLong(gb.composite.hWnd, win.GWL_ID, 3)
 	gb.composite.name = "composite"
 
 	win.SetWindowPos(gb.checkBox.hWnd, win.HWND_TOP, 0, 0, 0, 0, win.SWP_NOMOVE|win.SWP_NOSIZE)
@@ -108,56 +114,14 @@ func NewGroupBox(parent Container) (*GroupBox, error) {
 }
 
 func (gb *GroupBox) AsContainerBase() *ContainerBase {
+	if gb.composite == nil {
+		return nil
+	}
+
 	return gb.composite.AsContainerBase()
 }
 
-func (gb *GroupBox) LayoutFlags() LayoutFlags {
-	if gb.composite == nil {
-		return 0
-	}
-
-	return gb.composite.LayoutFlags()
-}
-
-func (gb *GroupBox) MinSizeHint() Size {
-	if gb.composite == nil {
-		return Size{100, 100}
-	}
-
-	cmsh := gb.composite.MinSizeHint()
-
-	if gb.Checkable() {
-		s := gb.checkBox.SizeHint()
-
-		cmsh.Width = maxi(cmsh.Width, s.Width)
-		cmsh.Height += s.Height
-	}
-
-	return Size{cmsh.Width + 2, cmsh.Height + 14}
-}
-
-func (gb *GroupBox) SizeHint() Size {
-	return gb.MinSizeHint()
-}
-
-func (gb *GroupBox) HeightForWidth(width int) int {
-	if gb.composite == nil || gb.composite.layout == nil {
-		return 100
-	}
-
-	cmsh := gb.composite.layout.MinSizeForSize(Size{Width: width})
-
-	if gb.Checkable() {
-		s := gb.checkBox.SizeHint()
-
-		cmsh.Width = maxi(cmsh.Width, s.Width)
-		cmsh.Height += s.Height
-	}
-
-	return cmsh.Height + 14
-}
-
-func (gb *GroupBox) ClientBounds() Rectangle {
+func (gb *GroupBox) ClientBoundsPixels() Rectangle {
 	cb := windowClientBounds(gb.hWndGroupBox)
 
 	if gb.Layout() == nil {
@@ -165,14 +129,18 @@ func (gb *GroupBox) ClientBounds() Rectangle {
 	}
 
 	if gb.Checkable() {
-		s := gb.checkBox.SizeHint()
+		s := createLayoutItemForWidget(gb.checkBox).(MinSizer).MinSize()
 
 		cb.Y += s.Height
 		cb.Height -= s.Height
 	}
 
-	// FIXME: Use appropriate margins
-	return Rectangle{cb.X + 1, cb.Y + 14, cb.Width - 2, cb.Height - 14}
+	padding := gb.IntFrom96DPI(1)
+	return Rectangle{cb.X + padding, cb.Y + gb.headerHeight, cb.Width - 2*padding, cb.Height - gb.headerHeight - 2*padding}
+}
+
+func (gb *GroupBox) updateHeaderHeight() {
+	gb.headerHeight = gb.calculateTextSizeImpl("gM").Height
 }
 
 func (gb *GroupBox) Persistent() bool {
@@ -225,12 +193,14 @@ func (gb *GroupBox) applyFont(font *Font) {
 	}
 
 	if gb.hWndGroupBox != 0 {
-		setWindowFont(gb.hWndGroupBox, font)
+		SetWindowFont(gb.hWndGroupBox, font)
 	}
 
 	if gb.composite != nil {
 		gb.composite.applyFont(font)
 	}
+
+	gb.updateHeaderHeight()
 }
 
 func (gb *GroupBox) SetSuspended(suspend bool) {
@@ -278,7 +248,7 @@ func (gb *GroupBox) SetCheckable(checkable bool) {
 
 	gb.SetTitle(title)
 
-	gb.updateParentLayout()
+	gb.RequestLayout()
 }
 
 func (gb *GroupBox) Checked() bool {
@@ -291,6 +261,16 @@ func (gb *GroupBox) SetChecked(checked bool) {
 
 func (gb *GroupBox) CheckedChanged() *Event {
 	return gb.checkBox.CheckedChanged()
+}
+
+func (gb *GroupBox) ApplyDPI(dpi int) {
+	gb.WidgetBase.ApplyDPI(dpi)
+	if gb.checkBox != nil {
+		gb.checkBox.ApplyDPI(dpi)
+	}
+	if gb.composite != nil {
+		gb.composite.ApplyDPI(dpi)
+	}
 }
 
 func (gb *GroupBox) Children() *WidgetList {
@@ -336,7 +316,14 @@ func (gb *GroupBox) WndProc(hwnd win.HWND, msg uint32, wParam, lParam uintptr) u
 				return hBrush
 			}
 
-		case win.WM_COMMAND, win.WM_NOTIFY:
+		case win.WM_COMMAND:
+			hwndSrc := win.GetDlgItem(gb.hWnd, int32(win.LOWORD(uint32(wParam))))
+
+			if window := windowFromHandle(hwndSrc); window != nil {
+				window.WndProc(hwnd, msg, wParam, lParam)
+			}
+
+		case win.WM_NOTIFY:
 			gb.composite.WndProc(hwnd, msg, wParam, lParam)
 
 		case win.WM_SETTEXT:
@@ -345,12 +332,19 @@ func (gb *GroupBox) WndProc(hwnd win.HWND, msg uint32, wParam, lParam uintptr) u
 		case win.WM_PAINT:
 			win.UpdateWindow(gb.checkBox.hWnd)
 
-		case win.WM_SIZE, win.WM_SIZING:
-			wbcb := gb.WidgetBase.ClientBounds()
+		case win.WM_WINDOWPOSCHANGED:
+			wp := (*win.WINDOWPOS)(unsafe.Pointer(lParam))
+
+			if wp.Flags&win.SWP_NOSIZE != 0 {
+				break
+			}
+
+			offset := gb.headerHeight / 4
+			wbcb := gb.WidgetBase.ClientBoundsPixels()
 			if !win.MoveWindow(
 				gb.hWndGroupBox,
 				int32(wbcb.X),
-				int32(wbcb.Y),
+				int32(wbcb.Y-offset),
 				int32(wbcb.Width),
 				int32(wbcb.Height),
 				true) {
@@ -360,14 +354,87 @@ func (gb *GroupBox) WndProc(hwnd win.HWND, msg uint32, wParam, lParam uintptr) u
 			}
 
 			if gb.Checkable() {
-				s := gb.checkBox.SizeHint()
-				gb.checkBox.SetBounds(Rectangle{9, 14, s.Width, s.Height})
+				s := createLayoutItemForWidget(gb.checkBox).(MinSizer).MinSize()
+				var x int
+				if l := gb.Layout(); l != nil {
+					x = gb.IntFrom96DPI(l.Margins().HNear)
+				} else {
+					x = gb.headerHeight * 2 / 3
+				}
+				gb.checkBox.SetBoundsPixels(Rectangle{x, gb.headerHeight, s.Width, s.Height})
 			}
 
-			gbcb := gb.ClientBounds()
-			gb.composite.SetBounds(gbcb)
+			gbcb := gb.ClientBoundsPixels()
+			gbcb.Y -= offset
+			gb.composite.SetBoundsPixels(gbcb)
 		}
 	}
 
 	return gb.WidgetBase.WndProc(hwnd, msg, wParam, lParam)
+}
+
+func (gb *GroupBox) CreateLayoutItem(ctx *LayoutContext) LayoutItem {
+	compositePos := Point{gb.IntFrom96DPI(1), gb.headerHeight}
+	if gb.Checkable() {
+		idealSize := gb.checkBox.idealSize()
+
+		compositePos.Y += idealSize.Height
+	}
+
+	li := &groupBoxLayoutItem{
+		compositePos: compositePos,
+		title:        gb.Title(),
+	}
+
+	gbli := CreateLayoutItemsForContainerWithContext(gb.composite, ctx)
+	gbli.AsLayoutItemBase().parent = li
+
+	li.children = append(li.children, gbli)
+
+	return li
+}
+
+type groupBoxLayoutItem struct {
+	ContainerLayoutItemBase
+	compositePos Point // in native pixels
+	title        string
+}
+
+func (li *groupBoxLayoutItem) LayoutFlags() LayoutFlags {
+	return li.children[0].LayoutFlags()
+}
+
+func (li *groupBoxLayoutItem) MinSize() Size {
+	min := li.children[0].(MinSizer).MinSize()
+	min.Width += li.compositePos.X * 2
+	min.Height += li.compositePos.Y + IntFrom96DPI(5, li.ctx.dpi)
+
+	return min
+}
+
+func (li *groupBoxLayoutItem) MinSizeForSize(size Size) Size {
+	return li.MinSize()
+}
+
+func (li *groupBoxLayoutItem) HasHeightForWidth() bool {
+	return li.children[0].(HeightForWidther).HasHeightForWidth()
+}
+
+func (li *groupBoxLayoutItem) HeightForWidth(width int) int {
+	return li.children[0].(HeightForWidther).HeightForWidth(width-li.compositePos.X*2) + li.compositePos.Y + IntFrom96DPI(5, li.ctx.dpi)
+}
+
+func (li *groupBoxLayoutItem) IdealSize() Size {
+	size := li.children[0].(IdealSizer).IdealSize()
+	size.Height += li.compositePos.Y
+	return size
+}
+
+func (li *groupBoxLayoutItem) PerformLayout() []LayoutResultItem {
+	return []LayoutResultItem{
+		{
+			Item:   li.children[0],
+			Bounds: Rectangle{X: li.compositePos.X, Y: li.compositePos.Y, Width: li.geometry.Size.Width - li.compositePos.X*2, Height: li.geometry.Size.Height - li.compositePos.Y - IntFrom96DPI(5, li.ctx.dpi)},
+		},
+	}
 }

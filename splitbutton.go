@@ -22,10 +22,8 @@ type SplitButton struct {
 func NewSplitButton(parent Container) (*SplitButton, error) {
 	sb := new(SplitButton)
 
-	menu, err := NewMenu()
-	if err != nil {
-		return nil, err
-	}
+	var disposables Disposables
+	defer disposables.Treat()
 
 	if err := InitWidget(
 		sb,
@@ -35,13 +33,22 @@ func NewSplitButton(parent Container) (*SplitButton, error) {
 		0); err != nil {
 		return nil, err
 	}
+	disposables.Add(sb)
 
 	sb.Button.init()
 
+	menu, err := NewMenu()
+	if err != nil {
+		return nil, err
+	}
+	disposables.Add(menu)
+	menu.window = sb
 	sb.menu = menu
 
 	sb.GraphicsEffects().Add(InteractionEffect)
 	sb.GraphicsEffects().Add(FocusEffect)
+
+	disposables.Spare()
 
 	return sb, nil
 }
@@ -50,22 +57,6 @@ func (sb *SplitButton) Dispose() {
 	sb.Button.Dispose()
 
 	sb.menu.Dispose()
-}
-
-func (*SplitButton) LayoutFlags() LayoutFlags {
-	return GrowableHorz
-}
-
-func (sb *SplitButton) MinSizeHint() Size {
-	var s win.SIZE
-
-	sb.SendMessage(win.BCM_GETIDEALSIZE, 0, uintptr(unsafe.Pointer(&s)))
-
-	return maxSize(Size{int(s.CX), int(s.CY)}, sb.dialogBaseUnitsToPixels(Size{50, 14}))
-}
-
-func (sb *SplitButton) SizeHint() Size {
-	return sb.MinSizeHint()
 }
 
 func (sb *SplitButton) ImageAboveText() bool {

@@ -7,8 +7,6 @@
 package walk
 
 import (
-	"strconv"
-
 	"github.com/lxn/win"
 )
 
@@ -17,14 +15,16 @@ const tabPageWindowClass = `\o/ Walk_TabPage_Class \o/`
 var tabPageBackgroundBrush Brush
 
 func init() {
-	MustRegisterWindowClass(tabPageWindowClass)
+	AppendToWalkInit(func() {
+		MustRegisterWindowClass(tabPageWindowClass)
 
-	tabPageBackgroundBrush, _ = NewSystemColorBrush(win.COLOR_WINDOW)
+		tabPageBackgroundBrush, _ = NewSystemColorBrush(win.COLOR_WINDOW)
+	})
 }
 
 type TabPage struct {
 	ContainerBase
-	image                 *Bitmap
+	image                 Image
 	title                 string
 	tabWidget             *TabWidget
 	titleChangedPublisher EventPublisher
@@ -59,26 +59,9 @@ func NewTabPage() (*TabPage, error) {
 			return tp.Image()
 		},
 		func(v interface{}) error {
-			var img *Bitmap
-
-			switch val := v.(type) {
-			case *Bitmap:
-				img = val
-
-			case int:
-				var err error
-				if img, err = Resources.Bitmap(strconv.Itoa(val)); err != nil {
-					return err
-				}
-
-			case string:
-				var err error
-				if img, err = Resources.Bitmap(val); err != nil {
-					return err
-				}
-
-			default:
-				return ErrInvalidType
+			img, err := ImageFrom(v)
+			if err != nil {
+				return err
 			}
 
 			return tp.SetImage(img)
@@ -120,11 +103,11 @@ func (tp *TabPage) Font() *Font {
 	return defaultFont
 }
 
-func (tp *TabPage) Image() *Bitmap {
+func (tp *TabPage) Image() Image {
 	return tp.image
 }
 
-func (tp *TabPage) SetImage(value *Bitmap) error {
+func (tp *TabPage) SetImage(value Image) error {
 	tp.image = value
 
 	if tp.tabWidget == nil {

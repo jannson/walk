@@ -7,7 +7,9 @@
 package walk
 
 import (
+	"math"
 	"sort"
+	"sync"
 
 	"github.com/lxn/win"
 )
@@ -15,29 +17,29 @@ import (
 type Orientation byte
 
 const (
-	Horizontal Orientation = iota
-	Vertical
+	NoOrientation Orientation = 0
+	Horizontal                = 1 << 0
+	Vertical                  = 1 << 1
 )
 
 type BoxLayout struct {
-	container          Container
-	margins            Margins
-	spacing            int
+	LayoutBase
 	orientation        Orientation
-	alignment          Alignment2D
 	hwnd2StretchFactor map[win.HWND]int
-	size2MinSize       map[Size]Size
-	resetNeeded        bool
 }
 
 func newBoxLayout(orientation Orientation) *BoxLayout {
-	return &BoxLayout{
+	l := &BoxLayout{
+		LayoutBase: LayoutBase{
+			margins96dpi: Margins{9, 9, 9, 9},
+			spacing96dpi: 6,
+		},
 		orientation:        orientation,
 		hwnd2StretchFactor: make(map[win.HWND]int),
-		size2MinSize:       make(map[Size]Size),
-		margins:            Margins{9, 9, 9, 9},
-		spacing:            6,
 	}
+	l.layout = l
+
+	return l
 }
 
 func NewHBoxLayout() *BoxLayout {
@@ -46,42 +48,6 @@ func NewHBoxLayout() *BoxLayout {
 
 func NewVBoxLayout() *BoxLayout {
 	return newBoxLayout(Vertical)
-}
-
-func (l *BoxLayout) Container() Container {
-	return l.container
-}
-
-func (l *BoxLayout) SetContainer(value Container) {
-	if value != l.container {
-		if l.container != nil {
-			l.container.SetLayout(nil)
-		}
-
-		l.container = value
-
-		if value != nil && value.Layout() != Layout(l) {
-			value.SetLayout(l)
-
-			l.Update(true)
-		}
-	}
-}
-
-func (l *BoxLayout) Margins() Margins {
-	return l.margins
-}
-
-func (l *BoxLayout) SetMargins(value Margins) error {
-	if value.HNear < 0 || value.VNear < 0 || value.HFar < 0 || value.VFar < 0 {
-		return newError("margins must be positive")
-	}
-
-	l.margins = value
-
-	l.Update(false)
-
-	return nil
 }
 
 func (l *BoxLayout) Orientation() Orientation {
@@ -99,43 +65,7 @@ func (l *BoxLayout) SetOrientation(value Orientation) error {
 
 		l.orientation = value
 
-		l.Update(false)
-	}
-
-	return nil
-}
-
-func (l *BoxLayout) Alignment() Alignment2D {
-	return l.alignment
-}
-
-func (l *BoxLayout) SetAlignment(alignment Alignment2D) error {
-	if alignment != l.alignment {
-		if alignment < AlignHVDefault || alignment > AlignHFarVFar {
-			return newError("invalid Alignment value")
-		}
-
-		l.alignment = alignment
-
-		l.Update(false)
-	}
-
-	return nil
-}
-
-func (l *BoxLayout) Spacing() int {
-	return l.spacing
-}
-
-func (l *BoxLayout) SetSpacing(value int) error {
-	if value != l.spacing {
-		if value < 0 {
-			return newError("spacing cannot be negative")
-		}
-
-		l.spacing = value
-
-		l.Update(false)
+		l.container.RequestLayout()
 	}
 
 	return nil
@@ -166,40 +96,45 @@ func (l *BoxLayout) SetStretchFactor(widget Widget, factor int) error {
 
 		l.hwnd2StretchFactor[handle] = factor
 
-		l.Update(false)
+		l.container.RequestLayout()
 	}
 
 	return nil
 }
 
-func (l *BoxLayout) cleanupStretchFactors() {
-	widgets := l.container.Children()
-
-	for handle, _ := range l.hwnd2StretchFactor {
-		if !widgets.containsHandle(handle) {
-			delete(l.hwnd2StretchFactor, handle)
-		}
+func (l *BoxLayout) CreateLayoutItem(ctx *LayoutContext) ContainerLayoutItem {
+	li := &boxLayoutItem{
+		size2MinSize:       make(map[Size]Size),
+		orientation:        l.orientation,
+		hwnd2StretchFactor: make(map[win.HWND]int),
 	}
+
+	for hwnd, sf := range l.hwnd2StretchFactor {
+		li.hwnd2StretchFactor[hwnd] = sf
+	}
+
+	return li
 }
 
-type widgetInfo struct {
-	index      int
-	minSize    int
-	maxSize    int
-	stretch    int
-	greedy     bool
-	widgetBase *WidgetBase
+type boxLayoutItemInfo struct {
+	item     LayoutItem
+	index    int
+	prefSize int // in native pixels
+	minSize  int // in native pixels
+	maxSize  int // in native pixels
+	stretch  int
+	greedy   bool
 }
 
-type widgetInfoList []widgetInfo
+type boxLayoutItemInfoList []boxLayoutItemInfo
 
-func (l widgetInfoList) Len() int {
+func (l boxLayoutItemInfoList) Len() int {
 	return len(l)
 }
 
-func (l widgetInfoList) Less(i, j int) bool {
-	_, iIsSpacer := l[i].widgetBase.window.(*Spacer)
-	_, jIsSpacer := l[j].widgetBase.window.(*Spacer)
+func (l boxLayoutItemInfoList) Less(i, j int) bool {
+	_, iIsSpacer := l[i].item.(*spacerLayoutItem)
+	_, jIsSpacer := l[j].item.(*spacerLayoutItem)
 
 	if l[i].greedy == l[j].greedy {
 		if iIsSpacer == jIsSpacer {
@@ -218,200 +153,166 @@ func (l widgetInfoList) Less(i, j int) bool {
 	return l[i].greedy
 }
 
-func (l widgetInfoList) Swap(i, j int) {
+func (l boxLayoutItemInfoList) Swap(i, j int) {
 	l[i], l[j] = l[j], l[i]
 }
 
-func (l *BoxLayout) LayoutFlags() LayoutFlags {
-	if l.container == nil {
-		return 0
-	}
-
-	return boxLayoutFlags(l.orientation, l.container.Children())
+type boxLayoutItem struct {
+	ContainerLayoutItemBase
+	mutex              sync.Mutex
+	size2MinSize       map[Size]Size // in native pixels
+	orientation        Orientation
+	hwnd2StretchFactor map[win.HWND]int
 }
 
-func (l *BoxLayout) MinSize() Size {
-	if l.container == nil {
-		return Size{}
-	}
-
-	return l.MinSizeForSize(l.container.ClientBounds().Size())
+func (li *boxLayoutItem) LayoutFlags() LayoutFlags {
+	return boxLayoutFlags(li.orientation, li.children)
 }
 
-func (l *BoxLayout) MinSizeForSize(size Size) Size {
-	if l.container == nil {
-		return Size{}
-	}
+func (li *boxLayoutItem) IdealSize() Size {
+	return li.MinSize()
+}
 
-	if min, ok := l.size2MinSize[size]; ok {
+func (li *boxLayoutItem) MinSize() Size {
+	return li.MinSizeForSize(li.geometry.ClientSize)
+}
+
+func (li *boxLayoutItem) HeightForWidth(width int) int {
+	return li.MinSizeForSize(Size{width, li.geometry.ClientSize.Height}).Height
+}
+
+func (li *boxLayoutItem) MinSizeForSize(size Size) Size {
+	li.mutex.Lock()
+	defer li.mutex.Unlock()
+
+	if min, ok := li.size2MinSize[size]; ok {
 		return min
 	}
 
 	bounds := Rectangle{Width: size.Width, Height: size.Height}
 
-	items, err := boxLayoutItems(widgetsToLayout(l.Container().Children()), l.orientation, l.alignment, bounds, l.margins, l.spacing, l.hwnd2StretchFactor)
-	if err != nil {
-		return Size{}
-	}
+	items := boxLayoutItems(li, itemsToLayout(li.children), li.orientation, li.alignment, bounds, li.margins96dpi, li.spacing96dpi, li.hwnd2StretchFactor)
 
-	s := Size{l.margins.HNear + l.margins.HFar, l.margins.VNear + l.margins.VFar}
+	margins := MarginsFrom96DPI(li.margins96dpi, li.ctx.dpi)
+	spacing := IntFrom96DPI(li.spacing96dpi, li.ctx.dpi)
+	s := Size{margins.HNear + margins.HFar, margins.VNear + margins.VFar}
 
 	var maxSecondary int
-
 	for _, item := range items {
-		min := minSizeEffective(item.widget)
+		min := li.MinSizeEffectiveForChild(item.Item)
 
-		if hfw, ok := item.widget.(HeightForWidther); ok {
-			item.bounds.Height = hfw.HeightForWidth(item.bounds.Width)
+		if hfw, ok := item.Item.(HeightForWidther); ok && hfw.HasHeightForWidth() {
+			item.Bounds.Height = hfw.HeightForWidth(item.Bounds.Width)
 		} else {
-			item.bounds.Height = min.Height
+			item.Bounds.Height = min.Height
 		}
-		item.bounds.Width = min.Width
+		item.Bounds.Width = min.Width
 
-		if l.orientation == Horizontal {
-			maxSecondary = maxi(maxSecondary, item.bounds.Height)
+		if li.orientation == Horizontal {
+			maxSecondary = maxi(maxSecondary, item.Bounds.Height)
 
-			s.Width += item.bounds.Width
+			s.Width += item.Bounds.Width
 		} else {
-			maxSecondary = maxi(maxSecondary, item.bounds.Width)
+			maxSecondary = maxi(maxSecondary, item.Bounds.Width)
 
-			s.Height += item.bounds.Height
+			s.Height += item.Bounds.Height
 		}
 	}
 
-	if l.orientation == Horizontal {
-		s.Width += (len(items) - 1) * l.spacing
+	if li.orientation == Horizontal {
+		s.Width += (len(items) - 1) * spacing
 		s.Height += maxSecondary
 	} else {
-		s.Height += (len(items) - 1) * l.spacing
+		s.Height += (len(items) - 1) * spacing
 		s.Width += maxSecondary
 	}
 
 	if s.Width > 0 && s.Height > 0 {
-		l.size2MinSize[size] = s
+		li.size2MinSize[size] = s
 	}
 
 	return s
 }
 
-func (l *BoxLayout) Update(reset bool) error {
-	if l.container == nil {
-		return nil
-	}
-
-	l.size2MinSize = make(map[Size]Size)
-
-	if reset {
-		l.resetNeeded = true
-	}
-
-	if l.container.Suspended() {
-		return nil
-	}
-
-	if !performingScheduledLayouts && scheduleLayout(l) {
-		return nil
-	}
-
-	if l.resetNeeded {
-		l.resetNeeded = false
-
-		l.cleanupStretchFactors()
-	}
-
-	ifContainerIsScrollViewDoCoolSpecialLayoutStuff(l)
-
-	items, err := boxLayoutItems(widgetsToLayout(l.Container().Children()), l.orientation, l.alignment, l.container.ClientBounds(), l.margins, l.spacing, l.hwnd2StretchFactor)
-	if err != nil {
-		return err
-	}
-
-	return applyLayoutResults(l.container, items)
+func (li *boxLayoutItem) PerformLayout() []LayoutResultItem {
+	cb := Rectangle{Width: li.geometry.ClientSize.Width, Height: li.geometry.ClientSize.Height}
+	return boxLayoutItems(li, itemsToLayout(li.children), li.orientation, li.alignment, cb, li.margins96dpi, li.spacing96dpi, li.hwnd2StretchFactor)
 }
 
-func boxLayoutFlags(orientation Orientation, children *WidgetList) LayoutFlags {
-	var flags LayoutFlags
-	var hasNonShrinkableHorz bool
-	var hasNonShrinkableVert bool
-
-	count := children.Len()
-	if count == 0 {
+func boxLayoutFlags(orientation Orientation, children []LayoutItem) LayoutFlags {
+	if len(children) == 0 {
 		return ShrinkableHorz | ShrinkableVert | GrowableHorz | GrowableVert
-	} else {
-		for i := 0; i < count; i++ {
-			widget := children.At(i)
-
-			if _, ok := widget.(*splitterHandle); ok || !shouldLayoutWidget(widget) {
-				continue
-			}
-
-			if s, ok := widget.(*Spacer); ok {
-				if s.greedyLocallyOnly {
-					continue
-				}
-			}
-
-			f := widget.LayoutFlags()
-			flags |= f
-			if f&ShrinkableHorz == 0 {
-				hasNonShrinkableHorz = true
-			}
-			if f&ShrinkableVert == 0 {
-				hasNonShrinkableVert = true
-			}
-		}
 	}
 
-	if orientation == Horizontal {
-		flags |= GrowableHorz
+	var flags LayoutFlags
+	for i := 0; i < len(children); i++ {
+		item := children[i]
 
-		if hasNonShrinkableVert {
-			flags &^= ShrinkableVert
+		if _, ok := item.(*splitterHandleLayoutItem); ok || !shouldLayoutItem(item) {
+			continue
 		}
-	} else {
-		flags |= GrowableVert
 
-		if hasNonShrinkableHorz {
-			flags &^= ShrinkableHorz
+		if s, ok := item.(*spacerLayoutItem); ok {
+			if s.greedyLocallyOnly {
+				continue
+			}
 		}
+
+		f := item.LayoutFlags()
+		flags |= f
 	}
 
 	return flags
 }
 
-func boxLayoutItems(widgets []Widget, orientation Orientation, alignment Alignment2D, bounds Rectangle, margins Margins, spacing int, hwnd2StretchFactor map[win.HWND]int) ([]layoutResultItem, error) {
-	if len(widgets) == 0 {
-		return nil, nil
+// boxLayoutItems lays out items. bounds parameter is in native pixels.
+func boxLayoutItems(container ContainerLayoutItem, items []LayoutItem, orientation Orientation, alignment Alignment2D, bounds Rectangle, margins96dpi Margins, spacing96dpi int, hwnd2StretchFactor map[win.HWND]int) []LayoutResultItem {
+	if len(items) == 0 {
+		return nil
 	}
+
+	dpi := container.Context().dpi
+	margins := MarginsFrom96DPI(margins96dpi, dpi)
+	spacing := IntFrom96DPI(spacing96dpi, dpi)
 
 	var greedyNonSpacerCount int
 	var greedySpacerCount int
 	var stretchFactorsTotal [3]int
-	stretchFactors := make([]int, len(widgets))
+	stretchFactors := make([]int, len(items))
 	var minSizesRemaining int
-	minSizes := make([]int, len(widgets))
-	maxSizes := make([]int, len(widgets))
-	sizes := make([]int, len(widgets))
-	prefSizes2 := make([]int, len(widgets))
-	growable2 := make([]bool, len(widgets))
-	sortedWidgetInfo := widgetInfoList(make([]widgetInfo, len(widgets)))
+	minSizes := make([]int, len(items))
+	maxSizes := make([]int, len(items))
+	sizes := make([]int, len(items))
+	prefSizes2 := make([]int, len(items))
+	var shrinkableAmount1Total int
+	shrinkableAmount1 := make([]int, len(items))
+	shrinkable2 := make([]bool, len(items))
+	growable2 := make([]bool, len(items))
+	sortedItemInfo := boxLayoutItemInfoList(make([]boxLayoutItemInfo, len(items)))
 
-	for i, widget := range widgets {
-		sf := hwnd2StretchFactor[widget.Handle()]
+	for i, item := range items {
+		sf := hwnd2StretchFactor[item.Handle()]
 		if sf == 0 {
 			sf = 1
 		}
 		stretchFactors[i] = sf
 
-		flags := widget.LayoutFlags()
+		geometry := item.Geometry()
 
-		max := widget.MaxSize()
-		pref := widget.SizeHint()
+		flags := item.LayoutFlags()
+
+		max := geometry.MaxSize
+		var pref Size
+		if hfw, ok := item.(HeightForWidther); !ok || !hfw.HasHeightForWidth() {
+			if is, ok := item.(IdealSizer); ok {
+				pref = is.IdealSize()
+			}
+		}
 
 		if orientation == Horizontal {
 			growable2[i] = flags&GrowableVert > 0
 
-			minSizes[i] = minSizeEffective(widget).Width
+			minSizes[i] = container.MinSizeEffectiveForChild(item).Width
 
 			if max.Width > 0 {
 				maxSizes[i] = max.Width
@@ -423,18 +324,21 @@ func boxLayoutItems(widgets []Widget, orientation Orientation, alignment Alignme
 
 			prefSizes2[i] = pref.Height
 
-			sortedWidgetInfo[i].greedy = flags&GreedyHorz > 0
+			sortedItemInfo[i].prefSize = pref.Width
+			sortedItemInfo[i].greedy = flags&GreedyHorz > 0
 		} else {
 			growable2[i] = flags&GrowableHorz > 0
 
-			if hfw, ok := widget.(HeightForWidther); ok {
+			if hfw, ok := item.(HeightForWidther); ok && hfw.HasHeightForWidth() {
 				minSizes[i] = hfw.HeightForWidth(bounds.Width - margins.HNear - margins.HFar)
 			} else {
-				minSizes[i] = minSizeEffective(widget).Height
+				minSizes[i] = container.MinSizeEffectiveForChild(item).Height
 			}
 
 			if max.Height > 0 {
 				maxSizes[i] = max.Height
+			} else if hfw, ok := item.(HeightForWidther); ok && flags&GrowableVert == 0 && hfw.HasHeightForWidth() {
+				maxSizes[i] = minSizes[i]
 			} else if pref.Height > 0 && flags&GrowableVert == 0 {
 				maxSizes[i] = pref.Height
 			} else {
@@ -443,19 +347,33 @@ func boxLayoutItems(widgets []Widget, orientation Orientation, alignment Alignme
 
 			prefSizes2[i] = pref.Width
 
-			sortedWidgetInfo[i].greedy = flags&GreedyVert > 0
+			sortedItemInfo[i].prefSize = pref.Height
+			sortedItemInfo[i].greedy = flags&GreedyVert > 0
 		}
 
-		sortedWidgetInfo[i].index = i
-		sortedWidgetInfo[i].minSize = minSizes[i]
-		sortedWidgetInfo[i].maxSize = maxSizes[i]
-		sortedWidgetInfo[i].stretch = sf
-		sortedWidgetInfo[i].widgetBase = widget.AsWidgetBase()
+		sortedItemInfo[i].index = i
+		sortedItemInfo[i].minSize = minSizes[i]
+		sortedItemInfo[i].maxSize = maxSizes[i]
+		sortedItemInfo[i].stretch = sf
+		sortedItemInfo[i].item = item
 
-		minSizesRemaining += minSizes[i]
+		if orientation == Horizontal && flags&(ShrinkableHorz|GrowableHorz|GreedyHorz) == ShrinkableHorz ||
+			orientation == Vertical && flags&(ShrinkableVert|GrowableVert|GreedyVert) == ShrinkableVert {
+			if amount := sortedItemInfo[i].prefSize - minSizes[i]; amount > 0 {
+				shrinkableAmount1[i] = amount
+				shrinkableAmount1Total += amount
+			}
+		}
+		shrinkable2[i] = orientation == Horizontal && flags&ShrinkableVert != 0 || orientation == Vertical && flags&ShrinkableHorz != 0
 
-		if sortedWidgetInfo[i].greedy {
-			if _, isSpacer := widget.(*Spacer); !isSpacer {
+		if shrinkableAmount1[i] > 0 {
+			minSizesRemaining += sortedItemInfo[i].prefSize
+		} else {
+			minSizesRemaining += minSizes[i]
+		}
+
+		if sortedItemInfo[i].greedy {
+			if _, isSpacer := item.(*spacerLayoutItem); !isSpacer {
 				greedyNonSpacerCount++
 				stretchFactorsTotal[0] += sf
 			} else {
@@ -467,7 +385,7 @@ func boxLayoutItems(widgets []Widget, orientation Orientation, alignment Alignme
 		}
 	}
 
-	sort.Stable(sortedWidgetInfo)
+	sort.Stable(sortedItemInfo)
 
 	var start1, start2, space1, space2 int
 	if orientation == Horizontal {
@@ -482,26 +400,37 @@ func boxLayoutItems(widgets []Widget, orientation Orientation, alignment Alignme
 		space2 = bounds.Width - margins.HNear - margins.HFar
 	}
 
-	spacingRemaining := spacing * (len(widgets) - 1)
+	spacingRemaining := spacing * (len(items) - 1)
+	excess := float64(space1 - minSizesRemaining - spacingRemaining)
 
 	offsets := [3]int{0, greedyNonSpacerCount, greedyNonSpacerCount + greedySpacerCount}
-	counts := [3]int{greedyNonSpacerCount, greedySpacerCount, len(widgets) - greedyNonSpacerCount - greedySpacerCount}
+	counts := [3]int{greedyNonSpacerCount, greedySpacerCount, len(items) - greedyNonSpacerCount - greedySpacerCount}
 
 	for i := 0; i < 3; i++ {
 		stretchFactorsRemaining := stretchFactorsTotal[i]
 
 		for j := 0; j < counts[i]; j++ {
-			info := sortedWidgetInfo[offsets[i]+j]
+			info := sortedItemInfo[offsets[i]+j]
 			k := info.index
 
 			stretch := stretchFactors[k]
 			min := info.minSize
 			max := info.maxSize
-			size := min
+			var size int
+			var corrected bool
+			if shrinkableAmount1[k] > 0 {
+				size = info.prefSize
+				if excess < 0.0 {
+					size -= mini(shrinkableAmount1[k], int(math.Round(-excess/float64(shrinkableAmount1Total)*float64(shrinkableAmount1[k]))))
+					corrected = true
+				}
+			} else {
+				size = min
+			}
 
-			if min < max {
+			if !corrected && min < max {
 				excessSpace := float64(space1 - minSizesRemaining - spacingRemaining)
-				size += int(excessSpace * float64(stretch) / float64(stretchFactorsRemaining))
+				size += int(math.Round(excessSpace * float64(stretch) / float64(stretchFactorsRemaining)))
 				if size < min {
 					size = min
 				} else if size > max {
@@ -511,30 +440,36 @@ func boxLayoutItems(widgets []Widget, orientation Orientation, alignment Alignme
 
 			sizes[k] = size
 
-			minSizesRemaining -= min
+			if shrinkableAmount1[k] > 0 {
+				minSizesRemaining -= info.prefSize
+			} else {
+				minSizesRemaining -= min
+			}
 			stretchFactorsRemaining -= stretch
 			space1 -= (size + spacing)
 			spacingRemaining -= spacing
 		}
 	}
 
-	results := make([]layoutResultItem, 0, len(widgets))
+	results := make([]LayoutResultItem, 0, len(items))
 
 	excessTotal := space1 - minSizesRemaining - spacingRemaining
-	excessShare := excessTotal / len(widgets)
-	halfExcessShare := excessTotal / (len(widgets) * 2)
+	excessShare := excessTotal / len(items)
+	halfExcessShare := excessTotal / (len(items) * 2)
 	p1 := start1
-	for i, widget := range widgets {
+	for i, item := range items {
 		s1 := sizes[i]
 
 		var s2 int
-		if growable2[i] {
+		if hfw, ok := item.(HeightForWidther); ok && orientation == Horizontal && hfw.HasHeightForWidth() {
+			s2 = hfw.HeightForWidth(s1)
+		} else if shrinkable2[i] || growable2[i] {
 			s2 = space2
 		} else {
 			s2 = prefSizes2[i]
 		}
 
-		align := widget.Alignment()
+		align := item.Geometry().Alignment
 		if align == AlignHVDefault {
 			align = alignment
 		}
@@ -617,8 +552,8 @@ func boxLayoutItems(widgets []Widget, orientation Orientation, alignment Alignme
 
 		p1 += s1 + spacing
 
-		results = append(results, layoutResultItem{widget: widget, bounds: Rectangle{X: x, Y: y, Width: w, Height: h}})
+		results = append(results, LayoutResultItem{Item: item, Bounds: Rectangle{X: x, Y: y, Width: w, Height: h}})
 	}
 
-	return results, nil
+	return results
 }

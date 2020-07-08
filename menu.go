@@ -16,17 +16,21 @@ import (
 
 type Menu struct {
 	hMenu   win.HMENU
-	hWnd    win.HWND
+	window  Window
 	actions *ActionList
+	getDPI  func() int
 }
 
-func newMenuBar(hWnd win.HWND) (*Menu, error) {
+func newMenuBar(window Window) (*Menu, error) {
 	hMenu := win.CreateMenu()
 	if hMenu == 0 {
 		return nil, lastError("CreateMenu")
 	}
 
-	m := &Menu{hMenu: hMenu, hWnd: hWnd}
+	m := &Menu{
+		hMenu:  hMenu,
+		window: window,
+	}
 	m.actions = newActionList(m)
 
 	return m, nil
@@ -52,13 +56,17 @@ func NewMenu() (*Menu, error) {
 		return nil, lastError("SetMenuInfo")
 	}
 
-	m := &Menu{hMenu: hMenu}
+	m := &Menu{
+		hMenu: hMenu,
+	}
 	m.actions = newActionList(m)
 
 	return m, nil
 }
 
 func (m *Menu) Dispose() {
+	m.actions.Clear()
+
 	if m.hMenu != 0 {
 		win.DestroyMenu(m.hMenu)
 		m.hMenu = 0
@@ -73,12 +81,40 @@ func (m *Menu) Actions() *ActionList {
 	return m.actions
 }
 
+func (m *Menu) updateItemsWithImageForWindow(window Window) {
+	if m.window == nil {
+		m.window = window
+		defer func() {
+			m.window = nil
+		}()
+	}
+
+	for _, action := range m.actions.actions {
+		if action.image != nil {
+			m.onActionChanged(action)
+		}
+		if action.menu != nil {
+			action.menu.updateItemsWithImageForWindow(window)
+		}
+	}
+}
+
 func (m *Menu) initMenuItemInfoFromAction(mii *win.MENUITEMINFO, action *Action) {
 	mii.CbSize = uint32(unsafe.Sizeof(*mii))
 	mii.FMask = win.MIIM_FTYPE | win.MIIM_ID | win.MIIM_STATE | win.MIIM_STRING
 	if action.image != nil {
 		mii.FMask |= win.MIIM_BITMAP
-		mii.HbmpItem = action.image.handle()
+		dpi := 96
+		if m.getDPI != nil {
+			dpi = m.getDPI()
+		} else if m.window != nil {
+			dpi = m.window.DPI()
+		} else {
+			dpi = screenDPI()
+		}
+		if bmp, err := iconCache.Bitmap(action.image, dpi); err == nil {
+			mii.HbmpItem = bmp.hBmp
+		}
 	}
 	if action.IsSeparator() {
 		mii.FType |= win.MFT_SEPARATOR
@@ -118,7 +154,21 @@ func (m *Menu) initMenuItemInfoFromAction(mii *win.MENUITEMINFO, action *Action)
 	}
 }
 
+func (m *Menu) handleDefaultState(action *Action) {
+	if action.Default() {
+		// Unset other default actions before we set this one. Otherwise insertion fails.
+		win.SetMenuDefaultItem(m.hMenu, ^uint32(0), false)
+		for _, otherAction := range m.actions.actions {
+			if otherAction != action {
+				otherAction.SetDefault(false)
+			}
+		}
+	}
+}
+
 func (m *Menu) onActionChanged(action *Action) error {
+	m.handleDefaultState(action)
+
 	if !action.Visible() {
 		return nil
 	}
@@ -129,6 +179,10 @@ func (m *Menu) onActionChanged(action *Action) error {
 
 	if !win.SetMenuItemInfo(m.hMenu, uint32(m.actions.indexInObserver(action)), true, &mii) {
 		return newError("SetMenuItemInfo failed")
+	}
+
+	if action.Default() {
+		win.SetMenuDefaultItem(m.hMenu, uint32(m.actions.indexInObserver(action)), true)
 	}
 
 	if action.Exclusive() && action.Checked() {
@@ -171,6 +225,8 @@ func (m *Menu) onActionVisibleChanged(action *Action) error {
 }
 
 func (m *Menu) insertAction(action *Action, visibleChanged bool) (err error) {
+	m.handleDefaultState(action)
+
 	if !visibleChanged {
 		action.addChangedHandler(m)
 		defer func() {
@@ -194,14 +250,16 @@ func (m *Menu) insertAction(action *Action, visibleChanged bool) (err error) {
 		return newError("InsertMenuItem failed")
 	}
 
-	menu := action.menu
-	if menu != nil {
-		menu.hWnd = m.hWnd
+	if action.Default() {
+		win.SetMenuDefaultItem(m.hMenu, uint32(m.actions.indexInObserver(action)), true)
 	}
 
-	if m.hWnd != 0 {
-		win.DrawMenuBar(m.hWnd)
+	menu := action.menu
+	if menu != nil {
+		menu.window = m.window
 	}
+
+	m.ensureMenuBarRedrawn()
 
 	return
 }
@@ -217,11 +275,17 @@ func (m *Menu) removeAction(action *Action, visibleChanged bool) error {
 		action.removeChangedHandler(m)
 	}
 
-	if m.hWnd != 0 {
-		win.DrawMenuBar(m.hWnd)
-	}
+	m.ensureMenuBarRedrawn()
 
 	return nil
+}
+
+func (m *Menu) ensureMenuBarRedrawn() {
+	if m.window != nil {
+		if mw, ok := m.window.(*MainWindow); ok && mw != nil {
+			win.DrawMenuBar(mw.Handle())
+		}
+	}
 }
 
 func (m *Menu) onInsertedAction(action *Action) error {

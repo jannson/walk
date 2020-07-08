@@ -12,22 +12,25 @@ import (
 )
 
 import (
-	"github.com/lxn/win"
 	"time"
+
+	"github.com/lxn/win"
 )
 
 var webViewDWebBrowserEvents2Vtbl *win.DWebBrowserEvents2Vtbl
 
 func init() {
-	webViewDWebBrowserEvents2Vtbl = &win.DWebBrowserEvents2Vtbl{
-		syscall.NewCallback(webView_DWebBrowserEvents2_QueryInterface),
-		syscall.NewCallback(webView_DWebBrowserEvents2_AddRef),
-		syscall.NewCallback(webView_DWebBrowserEvents2_Release),
-		syscall.NewCallback(webView_DWebBrowserEvents2_GetTypeInfoCount),
-		syscall.NewCallback(webView_DWebBrowserEvents2_GetTypeInfo),
-		syscall.NewCallback(webView_DWebBrowserEvents2_GetIDsOfNames),
-		syscall.NewCallback(webView_DWebBrowserEvents2_Invoke),
-	}
+	AppendToWalkInit(func() {
+		webViewDWebBrowserEvents2Vtbl = &win.DWebBrowserEvents2Vtbl{
+			syscall.NewCallback(webView_DWebBrowserEvents2_QueryInterface),
+			syscall.NewCallback(webView_DWebBrowserEvents2_AddRef),
+			syscall.NewCallback(webView_DWebBrowserEvents2_Release),
+			syscall.NewCallback(webView_DWebBrowserEvents2_GetTypeInfoCount),
+			syscall.NewCallback(webView_DWebBrowserEvents2_GetTypeInfo),
+			syscall.NewCallback(webView_DWebBrowserEvents2_GetIDsOfNames),
+			syscall.NewCallback(webView_DWebBrowserEvents2_Invoke),
+		}
+	})
 }
 
 type webViewDWebBrowserEvents2 struct {
@@ -180,11 +183,11 @@ func webView_DWebBrowserEvents2_Invoke(
 		// FIXME: Horrible hack to avoid glitch where the document is not displayed.
 		time.AfterFunc(time.Millisecond*100, func() {
 			wv.Synchronize(func() {
-				b := wv.Bounds()
+				b := wv.BoundsPixels()
 				b.Width++
-				wv.SetBounds(b)
+				wv.SetBoundsPixels(b)
 				b.Width--
-				wv.SetBounds(b)
+				wv.SetBoundsPixels(b)
 			})
 		})
 

@@ -8,7 +8,7 @@ package walk
 
 import (
 	"fmt"
-	"strconv"
+	"unsafe"
 
 	"github.com/lxn/win"
 )
@@ -47,26 +47,9 @@ func (b *Button) init() {
 			return b.Image()
 		},
 		func(v interface{}) error {
-			var img Image
-
-			switch val := v.(type) {
-			case Image:
-				img = val
-
-			case int:
-				var err error
-				if img, err = Resources.Image(strconv.Itoa(val)); err != nil {
-					return err
-				}
-
-			case string:
-				var err error
-				if img, err = Resources.Image(val); err != nil {
-					return err
-				}
-
-			default:
-				return ErrInvalidType
+			img, err := ImageFrom(v)
+			if err != nil {
+				return err
 			}
 
 			b.SetImage(img)
@@ -85,16 +68,20 @@ func (b *Button) init() {
 		b.textChangedPublisher.Event()))
 }
 
+func (b *Button) ApplyDPI(dpi int) {
+	b.WidgetBase.ApplyDPI(dpi)
+
+	b.SetImage(b.image)
+}
+
 func (b *Button) Image() Image {
 	return b.image
 }
 
 func (b *Button) SetImage(image Image) error {
-	var typ uintptr
-	var handle uintptr
+	var typ, handle uintptr
 	switch img := image.(type) {
 	case nil:
-		// zeroes are good
 
 	case *Bitmap:
 		typ = win.IMAGE_BITMAP
@@ -102,17 +89,23 @@ func (b *Button) SetImage(image Image) error {
 
 	case *Icon:
 		typ = win.IMAGE_ICON
-		handle = uintptr(img.hIcon)
+		handle = uintptr(img.handleForDPI(b.DPI()))
 
 	default:
-		return newError("image must be either *walk.Bitmap or *walk.Icon")
+		bmp, err := iconCache.Bitmap(image, b.DPI())
+		if err != nil {
+			return err
+		}
+
+		typ = win.IMAGE_BITMAP
+		handle = uintptr(bmp.hBmp)
 	}
 
 	b.SendMessage(win.BM_SETIMAGE, typ, handle)
 
 	b.image = image
 
-	b.updateParentLayout()
+	b.RequestLayout()
 
 	b.imageChangedPublisher.Publish()
 
@@ -136,7 +129,9 @@ func (b *Button) SetText(value string) error {
 		return err
 	}
 
-	return b.updateParentLayout()
+	b.RequestLayout()
+
+	return nil
 }
 
 func (b *Button) Checked() bool {
@@ -221,4 +216,36 @@ func (b *Button) WndProc(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uint
 	}
 
 	return b.WidgetBase.WndProc(hwnd, msg, wParam, lParam)
+}
+
+// idealSize returns ideal button size in native pixels.
+func (b *Button) idealSize() Size {
+	var s win.SIZE
+
+	b.SendMessage(win.BCM_GETIDEALSIZE, 0, uintptr(unsafe.Pointer(&s)))
+
+	return maxSize(sizeFromSIZE(s), b.dialogBaseUnitsToPixels(Size{50, 14}))
+}
+
+func (b *Button) CreateLayoutItem(ctx *LayoutContext) LayoutItem {
+	return &buttonLayoutItem{
+		idealSize: b.idealSize(),
+	}
+}
+
+type buttonLayoutItem struct {
+	LayoutItemBase
+	idealSize Size // in native pixels
+}
+
+func (li *buttonLayoutItem) LayoutFlags() LayoutFlags {
+	return 0
+}
+
+func (li *buttonLayoutItem) IdealSize() Size {
+	return li.MinSize()
+}
+
+func (li *buttonLayoutItem) MinSize() Size {
+	return li.idealSize
 }
