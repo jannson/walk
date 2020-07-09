@@ -35,9 +35,8 @@ import (
 //         if (!IsDialogMessage(*hwnd, &m)) {
 //             TranslateMessage(&m);
 //             if (runDispatchHook((uintptr_t)&m)) {
-//                TranslateMessage(&m);
+//                DispatchMessage(&m);
 //             }
-//             DispatchMessage(&m);
 //         }
 //         shimRunSynchronized(fb_ptr);
 //     }
