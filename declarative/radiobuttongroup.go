@@ -12,7 +12,7 @@ import (
 )
 
 import (
-	"github.com/lxn/walk"
+	"github.com/jannson/walk"
 )
 
 type RadioButtonGroup struct {

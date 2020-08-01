@@ -13,7 +13,7 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/lxn/walk"
+	"github.com/jannson/walk"
 	"gopkg.in/Knetic/govaluate.v3"
 )
 
